@@ -1,12 +1,18 @@
 import argparse
 import json
 import os
+import shutil
+from datetime import datetime
+import uuid
 
 from openai import OpenAI
 from rich.console import Console
 from rich.markdown import Markdown
 
-DEFAULTSDIR = os.path.join(os.path.expanduser("~"), ".gpt", ".config", "defaults.json")
+CONFIGDIR = os.path.join(os.path.expanduser("~"), ".gpt", ".config")
+CONFIGFILE = os.path.join(CONFIGDIR, "config.json")
+CONFIGTEMP = os.path.join(os.getcwd(), "config.json")
+SESSIONSDIR = os.path.join(os.path.expanduser("~"), ".gpt", "sessions")
 MODELS: list[str] = [
     # GPT-4.1 family
     "gpt-4.1",
@@ -53,18 +59,23 @@ class ChatGPT:
         self.client: OpenAI = OpenAI()
         self.md_console: Console = Console()
         self.run: bool = True
+        self.session_id: uuid.UUID = uuid.uuid4()
 
     def load_defaults(self):
-        with open(DEFAULTSDIR, 'r') as file:
-            defaults = json.load(file)
+        if not os.path.exists(CONFIGDIR):
+            os.makedirs(CONFIGDIR)
+        if not os.path.isfile(CONFIGFILE):
+            shutil.copy(CONFIGTEMP, CONFIGFILE)
+        with open(CONFIGFILE, 'r') as file:
+            defaults: dict[str, str | dict[str, str] | bool] = json.load(file)
         self.model = defaults["model"]
         self.instructions = defaults["instructions"]
         self.messages = [defaults["messages"]]
         self.history = True if defaults["history"] else False
 
     def set_defaults(self, option: str, val: str):
-        with open(DEFAULTSDIR, 'r') as file:
-            defaults = json.load(file)
+        with open(CONFIGFILE, 'r') as file:
+            defaults: dict[str, str | dict[str, str] | bool] = json.load(file)
         match option:
             case "model":
                 if val in MODELS: 
@@ -91,7 +102,7 @@ class ChatGPT:
                 print("\ninvalid default option, defaults not changed")
                 self.help()
                 return
-        with open(DEFAULTSDIR, 'w') as file:
+        with open(CONFIGFILE, 'w') as file:
             json.dump(defaults, file)
 
     def stream_response_history(self, input: str):
@@ -167,10 +178,27 @@ class ChatGPT:
                             self.help()
                 case "instructions":
                     print("current instructions: {}".format(self.instructions))
+                case "sessions":
+                    self.load_sessions()
+                case "load":
+                    if len(usr_input.split(" ")) == 2:
+                        session = usr_input.split(" ")[1]
+                        self.load_session(session)
+                    else:
+                        print("invalid argument!")
+                        self.help()
                 case "reset": 
                     self.load_defaults()
+                    if self.history:
+                        save = input("want to save current session in file? [Y/N] ")
+                        if save == "Y":
+                            self.save_session()
                     self.help()
                 case "exit" | "q":
+                    if self.history:
+                        save = input("want to save current session in file? [Y/N] ")
+                        if save == "Y":
+                            self.save_session()
                     self.run = False
                 case _:
                     print("\nnot a valid command!")
@@ -189,13 +217,62 @@ class ChatGPT:
                 print("{:30}".format(model), end="")
         print()
 
+    def generate_session_name(self) -> str:
+        topic_msg = self.messages
+        topic_msg.append({"role": "user", "content": "generate a file name that would describe this session the best, at most 50 characters and only text and use only _ or - characters between words. NOTE! Only output the session topic nothing else! (no extensions)"})
+        timestring = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        try:
+            completion = self.client.chat.completions.create(
+                model=self.model,
+                messages=topic_msg)
+
+            topic = completion.choices[0].message.content
+            filename = "{}_{}".format(timestring, topic)
+        except Exception as e:
+            filename = "{}_no-topic".format(timestring)
+            print("failed generatic session topic for filename:\n {}".format(e))
+            print("saving as {}".format(filename))
+
+        return filename
+
+    def save_session(self):
+        if not os.path.exists(SESSIONSDIR):
+            os.makedirs(SESSIONSDIR)
+        name = self.generate_session_name()
+        sessionfile = os.path.join(SESSIONSDIR, name)
+        with open(sessionfile, 'w') as file:
+            json.dump(self.messages, file)
+        print("session '{}' saved".format(name)) 
+
+    def load_session(self, filename: str):
+        sessionfile = os.path.join(SESSIONSDIR, filename)
+        if os.path.isfile(sessionfile):
+            with open(sessionfile, 'r') as file:
+                self.messages = json.load(file)
+            self.history = True
+        else:
+            print("invalid session filename '{}'\n".format(filename))
+            self.load_sessions()
+
+    def load_sessions(self):
+        if not os.path.exists(SESSIONSDIR):
+            os.makedirs(SESSIONSDIR)
+        sessions = os.listdir(SESSIONSDIR)
+        print("\tsaved sessions:")
+        for session in sessions:
+            print("\t{}".format(session))
+        print()
+
     def help(self):
         print("ChatGPT CLI Interface, type a prompt or command\n")
         print("\tmodel:\t{}\n".format(self.model))
         print("\t:models\t\t\t\t\t\t--shows all available models")
+        print("\t:sessions\t\t\t\t\t--lists all saved sessions")
         print("\t:instructions\t\t\t\t\t--shows current instrucions\n")
-        print("\t:set model <model>\t\t\t\t--sets session model (gpt-4, gpt-o3 ...)")
+        print("\t:set model <model>\t\t\t\t--sets session model (gpt-4, o3, ...)")
         print("\t:set instructions <instructions>\t\t--sets session instructions (\"You're a helpful assistant\")")
+        print("\t:set history <on/off>\t\t\t\t--sets session history (on/off)")
+        print("\t:load <session>\t\t\t\t\t--loads session history, see :sessions for saved sessions\n")
         print("\t:set default model <model>\t\t\t--sets default model")
         print("\t:set default history <on/off>\t\t\t--sets default history on/off")
         print("\t:set default instructions <instructions>\t--sets default instructions")
@@ -212,6 +289,6 @@ def main(model: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ChatGPT CLI interface")
-    _ = parser.add_argument("--model", type=str, default="", help="select model (gpt-4, gpt-o3, etc..)")
+    _ = parser.add_argument("--model", type=str, default="", help="select model (gpt-4, o3, etc..)")
     args = parser.parse_args()
     main(args.model)
