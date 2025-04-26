@@ -65,7 +65,7 @@ class ChatGPT:
         if not os.path.exists(CONFIGDIR):
             os.makedirs(CONFIGDIR)
         if not os.path.isfile(CONFIGFILE):
-            shutil.copy(CONFIGTEMP, CONFIGFILE)
+            _ = shutil.copy(CONFIGTEMP, CONFIGFILE)
         with open(CONFIGFILE, 'r') as file:
             defaults: dict[str, str | dict[str, str] | bool] = json.load(file)
         self.model = defaults["model"]

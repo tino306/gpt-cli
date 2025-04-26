@@ -1,10 +1,10 @@
+#!/bin/zsh
 
-pwd=$(pwd)
-
-source ~/.venvs/chatgpt/bin/activate
+usr_dir=$(pwd)
+source ~/.venvs/gpt-cli/bin/activate
 mkdir -p ~/.gpt
 cd ~/projects/gpt-cli
-python3 chatgpt.py
+python3 gpt-cli.py
 deactivate
 
-cd $pwd
+cd $usr_dir
