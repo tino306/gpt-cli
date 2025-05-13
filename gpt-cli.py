@@ -4,6 +4,8 @@ import os
 import shutil
 from datetime import datetime
 from io import StringIO
+from uuid import uuid4
+import copy
 
 from openai import OpenAI
 from rich.console import Console
@@ -13,7 +15,8 @@ from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit import PromptSession
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
-import pandas as pd
+from pandas import read_excel
+from pypdf import PdfReader
 
 from session_manager import SessionManager
 
@@ -76,7 +79,8 @@ TXT_EXTENSIONS: list[str] = [
      'cfg',
      'bat',
      'sh',
-     'rst'
+     'rst',
+     'scala'
  ]
 
 class CLIApp:
@@ -92,16 +96,16 @@ class CLIApp:
 
 class ChatGPT:
     def __init__(self):
+        self.run: bool = True
         self.model: str
         self.instructions: str
         self.messages: list[dict[str, str]]
         self.attached_files: list[str] = []
         self.file_contents: str = ""
         self.load_defaults()
-        self.ps1: str = "\033[1;32mchatgpt:{}\033[0m\033[0;35m>\033[0m".format(self.model)
+        self.uuid: str = str(uuid4())
         self.client: OpenAI = OpenAI()
         self.md_console: Console = Console()
-        self.run: bool = True
         self.session_manager: SessionManager = SessionManager()
         self.prompt_history: InMemoryHistory = InMemoryHistory()
         self.load_prompt_history()
@@ -110,6 +114,16 @@ class ChatGPT:
             auto_suggest=AutoSuggestFromHistory(),
             enable_history_search=True
         )
+
+    @property
+    def ps1(self) -> str:
+        if len(self.attached_files) != 0:
+            return "\033[1;32mchatgpt:{}\033[0m (files: {})\033[0;35m>\033[0m".format(self.model, ", ".join(self.attached_files))
+        else:
+            return "\033[1;32mchatgpt:{}\033[0m\033[0;35m>\033[0m".format(self.model)
+
+    def clear(self):
+        _ = os.system('clear')
 
     def load_prompt_history(self):
         self.prompt_history.append_string(":set history ")
@@ -124,7 +138,7 @@ class ChatGPT:
         self.prompt_history.append_string(":reset")
         self.prompt_history.append_string(":exit")
         self.prompt_history.append_string(":q")
-        sessions = self.session_manager.load_sessions()
+        sessions = self.session_manager.get_session_list()
         for session in sessions:
             self.prompt_history.append_string(":load {}".format(session))
         self.prompt_history.append_string(":set model ")
@@ -140,20 +154,20 @@ class ChatGPT:
         self.instructions = defaults["instructions"]
         self.messages = [defaults["messages"]]
 
-    def set_defaults(self, option: str, val: str):
+    def set_defaults(self, option: str, value: str):
         with open(CONFIGFILE, 'r') as file:
             defaults: dict[str, str | dict[str, str] | bool] = json.load(file)
         match option:
             case "model":
-                if val in MODELS: 
-                    self.model = val
+                if value in MODELS: 
+                    self.model = value
                     defaults["model"] = self.model
                 else:
                     print("\ninvalid argument for \'model\', see :models for valid models")
             case "instruction":
-                self.instructions = val
-                self.messages = [{"role": "developer", "content": val}]
-                defaults["messages"] = {"role": "developer", "content": val}
+                self.instructions = value
+                self.messages = [{"role": "developer", "content": value}]
+                defaults["messages"] = {"role": "developer", "content": value}
                 defaults["instructions"] = self.instructions
             case _:
                 print("\ninvalid default option, defaults not changed")
@@ -167,7 +181,6 @@ class ChatGPT:
             self.messages.append({"role": "user", "content": "{}, files: {{ {} }}".format(input,self.file_contents)})
             self.file_contents = ""
             self.attached_files = []
-            self.ps1 = "\033[1;32mchatgpt:{}\033[0m\033[0;35m>\033[0m".format(self.model)
         self.messages.append({"role": "user", "content": "{}".format(input)})
         try:
             with Live(Markdown(""), console=self.md_console, refresh_per_second=8) as live:
@@ -181,6 +194,7 @@ class ChatGPT:
                     if content:
                         content_buffer += content
                     live.update(Markdown(content_buffer))
+            self.messages.append({"role": "assistant", "content": content_buffer})
         except Exception as e:
             print(e)
 
@@ -192,6 +206,8 @@ class ChatGPT:
         elif usr_input[0] == ":":
             cmd = usr_input.split(" ")[0].strip(":")
             match cmd:
+                case "clear":
+                    self.clear()
                 case "models":
                     self.disp_models()
                 case "set":
@@ -223,18 +239,18 @@ class ChatGPT:
                 case "instructions":
                     print("current instructions: {}".format(self.instructions))
                 case "sessions":
-                    sessions = self.session_manager.load_sessions()
+                    sessions = self.session_manager.get_session_list()
                     for session in sessions:
                         print("\t{}".format(session))
                     print()
                 case "load":
                     if len(usr_input.split(" ")) == 2:
                         session = usr_input.split(" ")[1]
-                        messages = self.session_manager.get_session(session)
-                        if type(messages) == list[dict[str, str]]:
+                        messages = self.session_manager.load_session(session)
+                        if messages != None:
                             self.messages = messages
                         else:
-                            print("session not loaded")
+                            print("loading session failed")
                     else:
                         print("invalid argument!")
                         self.help()
@@ -243,17 +259,16 @@ class ChatGPT:
                 case "remove":
                     self.remove_files()
                 case "reset": 
-                    self.load_defaults()
                     save = input("want to save current session in file? [Y/N] ")
                     if save == "Y":
-                        name = self.generate_session_name()
-                        self.session_manager.save_session(self.messages, name)
+                        self.session_manager.save_session(self.messages, self.generate_session_name())
+                        self.prompt_history.append_string(":load {}".format(self.generate_session_name()))
+                    self.load_defaults()
                     self.help()
                 case "exit" | "q":
                     save = input("want to save current session in file? [Y/N] ")
                     if save == "Y":
-                        name = self.generate_session_name()
-                        self.session_manager.save_session(self.messages, name)
+                        self.session_manager.save_session(self.messages, self.generate_session_name())
                     self.run = False
                 case _:
                     print("\nnot a valid command!")
@@ -270,7 +285,7 @@ class ChatGPT:
         print()
 
     def generate_session_name(self) -> str:
-        topic_msg = self.messages
+        topic_msg = self.messages.copy()
         topic_msg.append({"role": "user", "content": "generate a file name that would describe this session the best, at most 50 characters and only text and use only _ or - characters between words. NOTE! Only output the session topic nothing else! (no extensions)"})
         timestring = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         try:
@@ -305,7 +320,6 @@ class ChatGPT:
     def remove_files(self):
         self.file_contents = ""
         self.attached_files = []
-        self.ps1 = "\033[1;32mchatgpt:{}\033[0m\033[0;35m>\033[0m".format(self.model)
 
     def attach_file(self, path: str):
         if os.path.isfile(path):
@@ -315,23 +329,29 @@ class ChatGPT:
                 with open(path, 'r') as file:
                     content = file.read()
             elif extension == "xlsx":
-                content = self.convert_xlsx_to_text(path)
+                content = self.convert_xlsx_to_txt(path)
             elif extension == "pdf":
-                content = ""
+                content = self.convert_pdf_to_txt(path)
             else:
                 content = ""
             self.attached_files.append(filename)
             self.file_contents += "{{ {} }}: {{ {} }}, ".format(filename, content)
-            self.ps1 = "\033[1;32mchatgpt:{}\033[0m (files: {})\033[0;35m>\033[0m".format(self.model, ", ".join(self.attached_files))
         else:
             print("provided file path is invalid!")
 
-    def convert_xlsx_to_text(self, path: str) -> str:
-        df = pd.read_excel(path)
+    def convert_xlsx_to_txt(self, path: str) -> str:
+        df = read_excel(path)
         csv_buffer = StringIO()
         df.to_csv(csv_buffer, index=False)
         return csv_buffer.getvalue()
 
+    def convert_pdf_to_txt(self, path: str) -> str:
+        reader = PdfReader(path)
+        content = ''
+        for page in reader.pages:
+            content += page.extract_text() or ''
+
+        return content
 
 def main(model: str):
     gpt = ChatGPT()
